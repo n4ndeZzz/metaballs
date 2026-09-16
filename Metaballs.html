@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Relevo generacional — masa orgánica</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html,body{width:100%;height:100%;overflow:hidden;background:#05040a;}
+  body{font-family:'Space Grotesk',sans-serif;}
+  #glcanvas{position:fixed;inset:0;display:block;}
+
+  .textLayer{
+    position:fixed; left:0; right:0; bottom:9vh;
+    display:flex; flex-direction:column; align-items:center;
+    text-align:center; pointer-events:none; z-index:5;
+    padding:0 6vw;
+  }
+  .kicker{
+    font-size:clamp(12px,1.4vw,18px);
+    letter-spacing:3px;
+    text-transform:uppercase;
+    color:rgba(255,255,255,0.55);
+    margin-bottom:0.6em;
+    font-weight:500;
+    transition:opacity 0.6s ease;
+  }
+  .title{
+    font-size:clamp(22px,3.4vw,52px);
+    font-weight:700;
+    line-height:1.25;
+    color:#f4f0f6;
+    max-width:56ch;
+    transition:opacity 0.6s ease;
+  }
+
+  #help{
+    position:fixed; right:22px; bottom:20px; z-index:10;
+    font-size:11.5px; color:rgba(255,255,255,0.5);
+    line-height:1.8; text-align:right;
+    transition:opacity 0.4s ease;
+  }
+  #help b{color:rgba(255,255,255,0.85);}
+
+  #progress{
+    position:fixed; left:22px; bottom:20px; z-index:10;
+    font-size:11.5px; color:rgba(255,255,255,0.4);
+    letter-spacing:1px;
+  }
+
+  .hidden{opacity:0 !important;}
+</style>
+</head>
+<body>
+  <canvas id="glcanvas"></canvas>
+
+  <div class="textLayer" id="textLayer">
+    <div class="kicker" id="kicker"></div>
+    <div class="title" id="title"></div>
+  </div>
+
+  <div id="progress"></div>
+  <div id="help">
+    <b>espacio</b> / <b>→</b> avanzar &nbsp; <b>←</b> volver<br>
+    <b>F</b> pantalla completa &nbsp; <b>R</b> reiniciar &nbsp; <b>H</b> ocultar esto
+  </div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+// GRAMÁTICA VISUAL: masa orgánica que crece y se funde (metaballs).
+//
+// No hay nodos discretos conectados por líneas. Hay 5 "blobs"
+// (generación experimentada, generación joven, academia, industria,
+// ciudad) definidos como campos de distancia (SDF) que se combinan
+// con un mínimo suave (smooth-min): cuando se acercan lo suficiente,
+// no se "conectan" — se FUNDEN, cambia la topología de la forma.
+// El parámetro K controla qué tan fácil es esa fusión; la posición
+// y el radio de cada blob narran cercanía y crecimiento. Todo el
+// movimiento importante está atado a estos parámetros, nunca a
+// decoración suelta.
+// ═══════════════════════════════════════════════════════════════
+
+const VERT_SRC = `#version 300 es
+in vec2 aPosition;
+void main() {
+  gl_Position = vec4(aPosition, 0.0, 1.0);
+}`;
+
+const FRAG_SRC = `#version 300 es
+precision highp float;
+
+uniform vec2 uResolution;
+uniform float uTime;
+uniform vec3 uBlobPos[5];
+uniform float uBlobRadius[5];
+uniform vec3 uBlobColor[5];
+uniform float uBlobActive[5];
+uniform float uK;
+uniform float uNoiseAmp;
+uniform float uGlobalIntensity;
+
+out vec4 fragColor;
+
+float hash(vec3 p) {
+  p = fract(p * 0.3183099 + 0.1);
+  p *= 17.0;
+  return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+
+float vnoise(vec3 x) {
+  vec3 i = floor(x);
+  vec3 f = fract(x);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(
+      mix(hash(i + vec3(0.0,0.0,0.0)), hash(i + vec3(1.0,0.0,0.0)), f.x),
+      mix(hash(i + vec3(0.0,1.0,0.0)), hash(i + vec3(1.0,1.0,0.0)), f.x),
+      f.y),
+    mix(
+      mix(hash(i + vec3(0.0,0.0,1.0)), hash(i + vec3(1.0,0.0,1.0)), f.x),
+      mix(hash(i + vec3(0.0,1.0,1.0)), hash(i + vec3(1.0,1.0,1.0)), f.x),
+      f.y),
+    f.z);
+}
+
+float sdBlob(vec3 p, int idx) {
+  vec3 q = p - uBlobPos[idx];
+  float r = mix(-1.5, uBlobRadius[idx], uBlobActive[idx]);
+  float d = length(q) - r;
+  float n = vnoise(q * 2.2 + uTime * 0.15 + float(idx) * 11.0) - 0.5;
+  return d + n * uNoiseAmp;
+}
+
+float smin(float a, float b, float k) {
+  float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+  return mix(b, a, h) - k * h * (1.0 - h);
+}
+
+float mapScene(vec3 p) {
+  float d = 1.0e5;
+  for (int i = 0; i < 5; i++) {
+    float di = sdBlob(p, i);
+    d = smin(d, di, uK);
+  }
+  return d;
+}
+
+vec3 blendColor(vec3 p) {
+  vec3 colSum = vec3(0.0);
+  float wSum = 0.0;
+  for (int i = 0; i < 5; i++) {
+    float di = sdBlob(p, i);
+    float w = uBlobActive[i] / (0.001 + abs(di) + 0.15);
+    colSum += uBlobColor[i] * w;
+    wSum += w;
+  }
+  return colSum / max(wSum, 0.0001);
+}
+
+vec3 calcNormal(vec3 p) {
+  vec2 e = vec2(0.001, 0.0);
+  return normalize(vec3(
+    mapScene(p + e.xyy) - mapScene(p - e.xyy),
+    mapScene(p + e.yxy) - mapScene(p - e.yxy),
+    mapScene(p + e.yyx) - mapScene(p - e.yyx)
+  ));
+}
+
+vec3 rayDir(vec2 uv, vec3 ro, vec3 rt, float fov) {
+  vec3 f = normalize(rt - ro);
+  vec3 r = normalize(cross(vec3(0.0,1.0,0.0), f));
+  vec3 u = cross(f, r);
+  vec3 c = ro + f * fov;
+  vec3 i = c + uv.x * r + uv.y * u;
+  return normalize(i - ro);
+}
+
+void main() {
+  vec2 uv = (gl_FragCoord.xy - 0.5 * uResolution) / uResolution.y;
+  vec3 ro = vec3(0.0, 0.0, 6.0);
+  vec3 rd = rayDir(uv, ro, vec3(0.0), 1.8);
+
+  float t = 0.0;
+  bool hit = false;
+  vec3 p = ro;
+  for (int i = 0; i < 96; i++) {
+    p = ro + rd * t;
+    float d = mapScene(p);
+    if (d < 0.001) { hit = true; break; }
+    t += d * 0.8;
+    if (t > 20.0) break;
+  }
+
+  vec3 col;
+  if (hit) {
+    vec3 n = calcNormal(p);
+    vec3 lightDir = normalize(vec3(0.5, 0.8, 0.6));
+    float diff = clamp(dot(n, lightDir), 0.0, 1.0);
+    float fresnel = pow(1.0 - clamp(dot(n, -rd), 0.0, 1.0), 2.5);
+    vec3 blobCol = blendColor(p);
+    vec3 base = blobCol * (0.35 + 0.65 * diff);
+    vec3 glow = blobCol * fresnel * 1.4;
+    col = (base + glow) * uGlobalIntensity;
+  } else {
+    col = mix(vec3(0.02,0.015,0.03), vec3(0.05,0.03,0.06), uv.y * 0.5 + 0.5);
+  }
+
+  fragColor = vec4(col, 1.0);
+}`;
+
+// ═══════════════════════════════════════════════════════════════
+// Colores por entidad (índice fijo en el arreglo de 5 blobs)
+// 0: generación experimentada · 1: generación joven
+// 2: academia · 3: industria · 4: ciudad
+// ═══════════════════════════════════════════════════════════════
+const COLORS = [
+  [0.851, 0.545, 0.251], // ámbar — experiencia
+  [0.851, 0.247, 0.749], // magenta — juventud
+  [0.247, 0.549, 0.549], // teal — academia
+  [0.349, 0.400, 0.533], // slate — industria
+  [0.451, 0.502, 0.251], // sage — ciudad
+];
+
+function blob(pos, r, active) { return { pos, r, active }; }
+
+// cada momento define dónde está cada blob, qué tan grande, qué tan
+// activo, y el K global (facilidad de fusión). El "porqué" de cada
+// decisión queda en el comentario, no solo en el número.
+const MOMENTS = [
+  {
+    kicker: "Future Leaders Forum · Fórum UPB",
+    title: "RELEVO GENERACIONAL: LA VENTAJA QUE NADIE ESTÁ APROVECHANDO",
+    // potencial latente: dos masas existen, lejos, casi sin fundirse.
+    blobs: [blob([-1.8,0.1,0],0.55,1), blob([1.8,-0.1,0],0.5,1), blob([0,0.8,0],0.2,0), blob([-0.5,-0.7,0],0.2,0), blob([0.5,-0.7,0],0.2,0)],
+    k: 0.15, noiseAmp: 0.05, intensity: 0.55,
+  },
+  {
+    kicker: "Espacio",
+    title: "¿Un gran auditorio solo para hacer grados?",
+    // espacio contenido: más cerca pero rígidas, casi sin vida — uso limitado.
+    blobs: [blob([-0.9,0,0],0.45,1), blob([0.9,0,0],0.42,1), blob([0,0.8,0],0.2,0), blob([-0.5,-0.7,0],0.2,0), blob([0.5,-0.7,0],0.2,0)],
+    k: 0.10, noiseAmp: 0.02, intensity: 0.40,
+  },
+  {
+    kicker: "Encuentro",
+    title: "Los eventos no llegaron a la Universidad. La Universidad decidió encontrarse con el mundo.",
+    // apertura: empiezan a moverse y a buscarse, todavía sin fusionar.
+    blobs: [blob([-1.3,0.2,0],0.55,1), blob([1.3,-0.2,0],0.55,1), blob([0,0.8,0],0.2,0), blob([-0.5,-0.7,0],0.2,0), blob([0.5,-0.7,0],0.2,0)],
+    k: 0.20, noiseAmp: 0.12, intensity: 0.65,
+  },
+  {
+    kicker: "Tres fuerzas",
+    title: "Academia + Industria + Ciudad",
+    // el trío aparece como satélites propios, todavía distintos, sin fundirse aún.
+    blobs: [blob([-1.3,0.2,0],0.55,1), blob([1.3,-0.2,0],0.55,1), blob([0,0.9,0.3],0.28,1), blob([-0.55,-0.8,0.3],0.26,1), blob([0.55,-0.85,0.3],0.26,1)],
+    k: 0.20, noiseAmp: 0.10, intensity: 0.70,
+  },
+  {
+    kicker: "Impacto",
+    title: "Los eventos nunca fueron el objetivo. El impacto sí.",
+    // se acercan; la superficie se agita más — el impacto se siente, no se dibuja aparte.
+    blobs: [blob([-1.1,0.15,0],0.58,1), blob([1.1,-0.15,0],0.58,1), blob([0,0.75,0.25],0.30,1), blob([-0.5,-0.7,0.25],0.28,1), blob([0.5,-0.72,0.25],0.28,1)],
+    k: 0.25, noiseAmp: 0.20, intensity: 0.75,
+  },
+  {
+    kicker: "Comunidad",
+    title: "Un evento trae personas. Una comunidad trae transformación.",
+    // primera fusión real: K sube fuerte, la topología cambia — deja de ser "varias formas".
+    blobs: [blob([-0.6,0.1,0],0.62,1), blob([0.6,-0.1,0],0.62,1), blob([0,0.55,0.2],0.32,1), blob([-0.4,-0.5,0.2],0.30,1), blob([0.4,-0.5,0.2],0.30,1)],
+    k: 0.60, noiseAmp: 0.14, intensity: 0.80,
+  },
+  {
+    kicker: "Confianza",
+    title: "El talento crece a la velocidad de la confianza.",
+    // crecimiento literal: los radios aumentan mientras la fusión se sostiene.
+    blobs: [blob([-0.55,0.1,0],0.72,1), blob([0.55,-0.1,0],0.72,1), blob([0,0.5,0.18],0.34,1), blob([-0.38,-0.45,0.18],0.30,1), blob([0.38,-0.45,0.18],0.30,1)],
+    k: 0.65, noiseAmp: 0.13, intensity: 0.85,
+  },
+  {
+    kicker: "Rutas",
+    title: "La experiencia construye el camino. Las nuevas generaciones descubren nuevas rutas.",
+    // más ruido = más tendencia a formar tendones/caminos en la superficie de la masa.
+    blobs: [blob([-0.55,0.12,0],0.70,1), blob([0.55,-0.12,0],0.70,1), blob([0.05,0.55,0.2],0.32,1), blob([-0.42,-0.48,0.2],0.28,1), blob([0.44,-0.46,0.2],0.28,1)],
+    k: 0.55, noiseAmp: 0.28, intensity: 0.82,
+  },
+  {
+    kicker: "Relevo",
+    title: "Una visión. Dos generaciones.",
+    // se retrocede un poco el K: vuelven a leerse como dos, aunque tocándose — dualidad explícita.
+    blobs: [blob([-0.85,0.1,0],0.68,1), blob([0.85,-0.1,0],0.68,1), blob([0,0.6,0.15],0.20,1), blob([-0.4,-0.55,0.15],0.18,1), blob([0.4,-0.55,0.15],0.18,1)],
+    k: 0.35, noiseAmp: 0.10, intensity: 0.80,
+  },
+  {
+    kicker: "Composición",
+    title: "El crecimiento no ocurre cuando una generación reemplaza a otra. Ocurre cuando trabajan juntas.",
+    // convergencia máxima: K muy alto, distancia mínima, los satélites se integran de lleno.
+    blobs: [blob([-0.45,0.05,0],0.75,1), blob([0.45,-0.05,0],0.75,1), blob([0,0.4,0.15],0.22,1), blob([-0.35,-0.38,0.15],0.20,1), blob([0.35,-0.38,0.15],0.20,1)],
+    k: 0.85, noiseAmp: 0.15, intensity: 0.90,
+  },
+  {
+    kicker: "Presente",
+    title: "Los jóvenes no son el futuro. Son el presente que muchas organizaciones aún no ven.",
+    // la generación joven crece, se ilumina y avanza hacia cámara — foco narrativo explícito.
+    blobs: [blob([-0.55,0.05,-0.1],0.60,1), blob([0.15,0,0.6],0.95,1), blob([0,0.35,0.1],0.15,1), blob([-0.3,-0.32,0.1],0.13,1), blob([0.3,-0.32,0.1],0.13,1)],
+    k: 0.70, noiseAmp: 0.16, intensity: 0.92,
+  },
+  {
+    kicker: "Futuro construido",
+    title: "El futuro no se hereda. Se construye.",
+    // máxima actividad orgánica: la masa se deforma activamente, en construcción constante.
+    blobs: [blob([-0.4,0.05,0],0.72,1), blob([0.4,-0.05,0.2],0.80,1), blob([0,0.32,0.1],0.18,1), blob([-0.28,-0.3,0.1],0.18,1), blob([0.28,-0.3,0.1],0.18,1)],
+    k: 0.80, noiseAmp: 0.32, intensity: 0.95,
+  },
+  {
+    kicker: "Continuidad",
+    title: "@centrodeeventosupb",
+    // cierre: fusión máxima, respiración calma — una sola masa continua, no caótica.
+    blobs: [blob([-0.3,0,0],0.75,1), blob([0.3,0,0],0.78,1), blob([0,0.28,0.08],0.20,1), blob([-0.25,-0.26,0.08],0.20,1), blob([0.25,-0.26,0.08],0.20,1)],
+    k: 0.95, noiseAmp: 0.08, intensity: 1.0,
+  },
+];
+
+// ═══════════════════════════════════════════════════════════════
+// WebGL setup
+// ═══════════════════════════════════════════════════════════════
+const canvas = document.getElementById('glcanvas');
+const gl = canvas.getContext('webgl2');
+if (!gl) {
+  document.body.innerHTML = '<div style="color:#fff;padding:40px;font-family:sans-serif;">Este navegador no soporta WebGL2.</div>';
+  throw new Error('WebGL2 no disponible');
+}
+
+function compileShader(src, type) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    console.error(gl.getShaderInfoLog(s));
+    throw new Error('Error compilando shader');
+  }
+  return s;
+}
+
+const vs = compileShader(VERT_SRC, gl.VERTEX_SHADER);
+const fs = compileShader(FRAG_SRC, gl.FRAGMENT_SHADER);
+const program = gl.createProgram();
+gl.attachShader(program, vs);
+gl.attachShader(program, fs);
+gl.linkProgram(program);
+if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+  console.error(gl.getProgramInfoLog(program));
+  throw new Error('Error enlazando programa');
+}
+gl.useProgram(program);
+
+const quad = new Float32Array([-1,-1, 1,-1, -1,1, 1,1]);
+const vbo = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
+const aPosition = gl.getAttribLocation(program, 'aPosition');
+gl.enableVertexAttribArray(aPosition);
+gl.vertexAttribPointer(aPosition, 2, gl.FLOAT, false, 0, 0);
+
+const uniforms = {
+  resolution: gl.getUniformLocation(program, 'uResolution'),
+  time: gl.getUniformLocation(program, 'uTime'),
+  blobPos: gl.getUniformLocation(program, 'uBlobPos'),
+  blobRadius: gl.getUniformLocation(program, 'uBlobRadius'),
+  blobColor: gl.getUniformLocation(program, 'uBlobColor'),
+  blobActive: gl.getUniformLocation(program, 'uBlobActive'),
+  k: gl.getUniformLocation(program, 'uK'),
+  noiseAmp: gl.getUniformLocation(program, 'uNoiseAmp'),
+  intensity: gl.getUniformLocation(program, 'uGlobalIntensity'),
+};
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.floor(window.innerWidth * dpr);
+  canvas.height = Math.floor(window.innerHeight * dpr);
+  canvas.style.width = window.innerWidth + 'px';
+  canvas.style.height = window.innerHeight + 'px';
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ═══════════════════════════════════════════════════════════════
+// Interpolación entre momentos
+// ═══════════════════════════════════════════════════════════════
+function lerp(a, b, t) { return a + (b - a) * t; }
+function easeInOutCubic(t) { return t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2,3)/2; }
+
+function snapshotFrom(moment) {
+  return {
+    blobs: moment.blobs.map(b => ({ pos: b.pos.slice(), r: b.r, active: b.active })),
+    k: moment.k, noiseAmp: moment.noiseAmp, intensity: moment.intensity,
+  };
+}
+
+let currentIndex = 0;
+let fromState = snapshotFrom(MOMENTS[0]);
+let toState = snapshotFrom(MOMENTS[0]);
+let transStart = 0;
+const TRANS_MS = 2200;
+
+function goTo(index) {
+  index = Math.max(0, Math.min(MOMENTS.length - 1, index));
+  if (index === currentIndex && performance.now() - transStart < TRANS_MS) return;
+  fromState = currentState();
+  toState = snapshotFrom(MOMENTS[index]);
+  currentIndex = index;
+  transStart = performance.now();
+  updateText();
+}
+
+function currentState() {
+  const t = Math.min(1, (performance.now() - transStart) / TRANS_MS);
+  const e = easeInOutCubic(t);
+  return {
+    blobs: fromState.blobs.map((b, i) => ({
+      pos: b.pos.map((v, k) => lerp(v, toState.blobs[i].pos[k], e)),
+      r: lerp(b.r, toState.blobs[i].r, e),
+      active: lerp(b.active, toState.blobs[i].active, e),
+    })),
+    k: lerp(fromState.k, toState.k, e),
+    noiseAmp: lerp(fromState.noiseAmp, toState.noiseAmp, e),
+    intensity: lerp(fromState.intensity, toState.intensity, e),
+  };
+}
+
+function updateText() {
+  const m = MOMENTS[currentIndex];
+  const kickerEl = document.getElementById('kicker');
+  const titleEl = document.getElementById('title');
+  kickerEl.classList.add('hidden');
+  titleEl.classList.add('hidden');
+  setTimeout(() => {
+    kickerEl.textContent = m.kicker;
+    titleEl.textContent = m.title;
+    kickerEl.classList.remove('hidden');
+    titleEl.classList.remove('hidden');
+  }, 280);
+  document.getElementById('progress').textContent =
+    (currentIndex + 1).toString().padStart(2, '0') + ' / ' + MOMENTS.length.toString().padStart(2, '0');
+}
+updateText();
+
+// ═══════════════════════════════════════════════════════════════
+// Render loop
+// ═══════════════════════════════════════════════════════════════
+const startTime = performance.now();
+
+function render() {
+  const state = currentState();
+
+  const flatPos = new Float32Array(15);
+  const flatR = new Float32Array(5);
+  const flatCol = new Float32Array(15);
+  const flatActive = new Float32Array(5);
+  for (let i = 0; i < 5; i++) {
+    flatPos[i*3+0] = state.blobs[i].pos[0];
+    flatPos[i*3+1] = state.blobs[i].pos[1];
+    flatPos[i*3+2] = state.blobs[i].pos[2];
+    flatR[i] = state.blobs[i].r;
+    flatCol[i*3+0] = COLORS[i][0];
+    flatCol[i*3+1] = COLORS[i][1];
+    flatCol[i*3+2] = COLORS[i][2];
+    flatActive[i] = state.blobs[i].active;
+  }
+
+  gl.uniform2f(uniforms.resolution, canvas.width, canvas.height);
+  gl.uniform1f(uniforms.time, (performance.now() - startTime) / 1000);
+  gl.uniform3fv(uniforms.blobPos, flatPos);
+  gl.uniform1fv(uniforms.blobRadius, flatR);
+  gl.uniform3fv(uniforms.blobColor, flatCol);
+  gl.uniform1fv(uniforms.blobActive, flatActive);
+  gl.uniform1f(uniforms.k, state.k);
+  gl.uniform1f(uniforms.noiseAmp, state.noiseAmp);
+  gl.uniform1f(uniforms.intensity, state.intensity);
+
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  requestAnimationFrame(render);
+}
+requestAnimationFrame(render);
+
+// ═══════════════════════════════════════════════════════════════
+// Controles de teclado
+// ═══════════════════════════════════════════════════════════════
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Space' || e.code === 'ArrowRight') { e.preventDefault(); goTo(currentIndex + 1); }
+  else if (e.code === 'ArrowLeft') { e.preventDefault(); goTo(currentIndex - 1); }
+  else if (e.key === 'f' || e.key === 'F') {
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+    else document.exitFullscreen();
+  } else if (e.key === 'r' || e.key === 'R') {
+    goTo(0);
+  } else if (e.key === 'h' || e.key === 'H') {
+    document.getElementById('help').classList.toggle('hidden');
+    document.getElementById('progress').classList.toggle('hidden');
+  }
+});
+</script>
+</body>
+</html>
