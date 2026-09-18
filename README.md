@@ -6,3 +6,5 @@
 2. Puedo explicar qué relaciones existen y qué significan — `25`
 3. Puedo relacionar cambios de comportamiento con intención comunicativa — `25`
 4. Puedo demostrar el sistema funcionando y explicar las decisiones — `25`
+
+PUNTAJE — `100`
